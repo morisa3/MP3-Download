@@ -22,6 +22,8 @@ def show_loudness_dialog(studio, e=None):
     target=ft.TextField(label='另存位置',value=studio.folder.value,expand=True)
     lufs=ft.TextField(label='目標響度 LUFS',value=studio.lufs.value,expand=True)
     peak=ft.TextField(label='True peak 上限 dBTP',value=studio.peak.value,expand=True)
+    method=ft.Dropdown(label='校正方式',value=getattr(studio.loudness_mode,'value','gain') or 'gain',options=[
+        ft.dropdown.Option('gain','增益＋限幅（建議，清單音量一致）'),ft.dropdown.Option('loudnorm','FFmpeg loudnorm（舊方式）')])
     acknowledgment=ft.Checkbox(label='我確認以調整後的音訊覆蓋所選原檔',value=False,visible=False)
     error=ft.Text(color='red')
     def selected_folder(event):
@@ -83,7 +85,10 @@ def show_loudness_dialog(studio, e=None):
                         track.measurement=measure(path,OutputSettings(folder=str(path.parent),lufs=loudness,true_peak=ceiling),studio.cancel)
                         track.status='響度掃描完成'
                     else:
-                        dest,before,after=normalize_file(path,loudness,ceiling,overwrite,folder,studio.cancel,progress)
+                        dest,before,after=normalize_file(path,loudness,ceiling,overwrite,folder,studio.cancel,progress,
+                                                         method.value or 'gain')
+                        for text in after.get('warnings') or []:
+                            track.warning+='；'+text
                         track.measurement=dict(after if overwrite else before)
                         track.measurement['output_verification']=after
                         track.output=str(dest)
@@ -105,7 +110,7 @@ def show_loudness_dialog(studio, e=None):
     dialog=ft.AlertDialog(modal=True,title=ft.Text('響度調整'),content=ft.Container(width=650,
         content=ft.Column([source_mode,ft.Row([source,ft.IconButton(ft.icons.FOLDER_OPEN,
             tooltip='選擇歌曲資料夾',on_click=lambda e:source_picker.get_directory_path())]),recursive,
-            ft.Row([lufs,peak]),mode,ft.Row([target,ft.IconButton(ft.icons.FOLDER_OPEN,
+            ft.Row([lufs,peak]),method,mode,ft.Row([target,ft.IconButton(ft.icons.FOLDER_OPEN,
             tooltip='選擇另存位置',on_click=lambda e:output_picker.get_directory_path())]),acknowledgment,
             ft.Text('支援 MP3、M4A、FLAC、WAV、OGG、OPUS。保留檔案格式與原內嵌封面；MP3／AAC 等有損格式會重新編碼。'),
             ft.Text('僅掃描不修改檔案。覆蓋會在驗證完成後替換原檔，沒有另留備份；另存檔名會加「_響度調整」。'),

@@ -53,7 +53,7 @@ def action_button(text, icon, handler, color=COLOR_PRIMARY):
 
 
 OUTPUT_DIRECTORY = r'E:\download'
-APP_VERSION = '1.8.0'
+APP_VERSION = '1.9.0'
 
 
 class Studio(BatchActions):
@@ -78,6 +78,7 @@ class Studio(BatchActions):
         self.date_to = ''
         self.auto_clean_titles = True
         self.refresh_scan = False
+        self.numbering = 'auto'
         self.download_options_btn = ft.OutlinedButton('下載設定', height=40,
             icon=ft.icons.DATE_RANGE, on_click=self.download_options_clicked)
         self.url = ft.TextField(label='YouTube 單曲／播放清單網址', expand=True)
@@ -92,6 +93,10 @@ class Studio(BatchActions):
         self.norm = ft.Checkbox(label='自動校正響度', value=True)
         self.lufs = ft.TextField(label='LUFS', value='-14', width=95)
         self.peak = ft.TextField(label='True peak', value='-1', width=105)
+        self.loudness_mode = ft.Dropdown(label='校正方式', value='gain', width=150,
+            tooltip='增益＋限幅：整首只調一個音量，峰值超出才限幅，並驗證後再微調一次。\n'
+                    'loudnorm：舊方式，部分歌曲會被自動改成動態壓縮，音量可能不一致。',
+            options=[ft.dropdown.Option('gain', '增益＋限幅'), ft.dropdown.Option('loudnorm', 'loudnorm（舊）')])
         self.naming = ft.TextField(label='檔名格式', value='<曲目歌星>-<標題>', expand=True)
         self.shared_cover_uid = ''
         self.shared_cover_backup = None
@@ -123,7 +128,7 @@ class Studio(BatchActions):
         self.cover_target = None
         page.overlay.extend([self.audio_picker, self.image_picker, self.cover_picker, self.project_picker, self.cookies_picker, self.folder_picker])
         for control in (self.url, self.mode, self.folder, self.format, self.bitrate,
-                        self.rate, self.size, self.lufs, self.peak, self.naming, self.extra_covers):
+                        self.rate, self.size, self.lufs, self.peak, self.loudness_mode, self.naming, self.extra_covers):
             control.dense = True
             control.height = 42
             control.text_size = 13
@@ -170,7 +175,7 @@ class Studio(BatchActions):
                                      on_click=self.open_album_tab),
                         ft.TextButton('歌曲詳情', height=40, style=ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=10, vertical=4)), on_click=self.edit_selected)], spacing=0)
                 ], expand=True, spacing=2)], spacing=10),
-            ft.Row([self.norm, self.lufs, self.peak], spacing=8),
+            ft.Row([self.norm, self.lufs, self.peak, self.loudness_mode], spacing=8, wrap=True),
             ft.Row([self.embed, self.extra_covers], spacing=8),
             self.reports,
             ft.TextButton('只存圖片（不產生音檔）', icon=ft.icons.IMAGE,
@@ -261,6 +266,11 @@ class Studio(BatchActions):
         cleanup = ft.Checkbox(label='下載時自動整理歌曲標題（可在歌曲詳情還原）',
                               value=self.auto_clean_titles)
         refresh = ft.Checkbox(label='重新掃描網址與日期（忽略舊快取，取得新增／變更內容）', value=self.refresh_scan)
+        numbering = ft.Dropdown(label='曲目編號', value=self.numbering, dense=True, options=[
+            ft.dropdown.Option('auto', '自動：頻道 releases／videos 依發行時間（最舊為 1），清單照原順序'),
+            ft.dropdown.Option('oldest_first', '依發行時間：最舊為 1（新歌接在最後）'),
+            ft.dropdown.Option('newest_first', '依發行時間：最新為 1'),
+            ft.dropdown.Option('source', '照來源清單順序')])
         error = ft.Text(color='red')
         def clear(e):
             start.value, end.value = '', ''
@@ -274,6 +284,7 @@ class Studio(BatchActions):
                 self.date_to = last.isoformat() if last else ''
                 self.auto_clean_titles = bool(cleanup.value)
                 self.refresh_scan = bool(refresh.value)
+                self.numbering = numbering.value or 'auto'
                 self.download_options_btn.text = '下載設定（日期已限）' if limits.active else '下載設定'
                 self.download_options_btn.tooltip = f'{self.date_from or "不限"} ～ {self.date_to or "不限"}'
                 close_dialog(self.page, dialog)
@@ -288,7 +299,9 @@ class Studio(BatchActions):
                 ft.Text('清單日期不完整時需逐首查詢資訊，只有符合日期的影片才下載音訊。'),
                 ft.Text("掃描結果自動存入程式資料夾下的 list 資料夾；下次相同網址直接重用。"),
                 ft.Text("releases 頁面只讀單曲；多首專輯略過。首數未知時最多讀前兩個項目。"),
-                cleanup, refresh, error,
+                ft.Text('頻道 releases／videos 頁由新到舊排列；依發行時間編號時以頁面順序推算，'
+                        '重新掃描後已在清單的歌曲也會更新曲號（手動改過曲號者保留）。'),
+                numbering, cleanup, refresh, error,
             ], tight=True, scroll=ft.ScrollMode.AUTO)),
             actions=[ft.TextButton('取消', on_click=lambda e: close_dialog(self.page, dialog)),
                      ft.FilledButton('套用設定', on_click=save)])
@@ -383,7 +396,7 @@ class Studio(BatchActions):
         common_bbox = self.album.bbox if self.album.is_playlist else (shared.bbox if shared else [])
         return OutputSettings(folder=folder, format=self.format.value, bitrate=self.bitrate.value,
             sample_rate=int(self.rate.value), normalize=self.norm.value, lufs=float(self.lufs.value),
-            true_peak=float(self.peak.value), cover_size=int(self.size.value), naming=self.naming.value,
+            true_peak=float(self.peak.value), loudness_mode=self.loudness_mode.value or 'gain', cover_size=int(self.size.value), naming=self.naming.value,
             embed_cover=self.embed.value,extra_covers=self.extra_covers.value,write_report=self.reports.value,
             shared_cover=common_cover,shared_bbox=list(common_bbox or auto_bbox(common_cover)) if common_cover else [])
 
@@ -424,7 +437,7 @@ class Studio(BatchActions):
             self.items.controls.append(ft.Container(padding=8, bgcolor='#F0F5F4', border_radius=8,
                 content=ft.Row([
                     ft.Checkbox(value=track.selected, on_change=lambda e, t=track: setattr(t, 'selected', e.control.value)),
-                    track_thumbnail(effective_track(track, self.album) if self.album.is_playlist else self._thumbnail_track(track)),
+                    track_thumbnail(effective_track(track, self.album) if self.album.applies_to(track) else self._thumbnail_track(track)),
                     ft.Text(track.tracknumber or '—', width=48),
                     ft.Text(track.title or track.url or f'第 {track.tracknumber} 首待重試',
                             expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
@@ -513,6 +526,16 @@ class Studio(BatchActions):
         self.render()
         self.message('清單已清空；原始音檔、輸出檔案與圖片均保留。')
 
+    def reset_album_if_empty(self):
+        """An empty list must not pass the previous song's album info or cover to the next download."""
+        if self.tracks:
+            return False
+        self.album = AlbumInfo(completed_temp=list(self.album.completed_temp))
+        self.shared_cover_uid = ''
+        self.shared_cover_backup = None
+        self.album_editing = False
+        return True
+
     def remove_completed(self, track):
         # Remove only a confirmed successful export, including before a later cancellation.
         if track.status != '完成':
@@ -526,6 +549,9 @@ class Studio(BatchActions):
 
     def remove_selected(self, e):
         self.tracks = [t for t in self.tracks if not t.selected]
+        if self.reset_album_if_empty():
+            self.left_content.content = self.overview
+            self.album_view.sync()
         self.persist()
         self.render()
 
@@ -568,7 +594,7 @@ class Studio(BatchActions):
                 self.page.update()
                 return
             for k in fields:
-                if k in ('artist','albumartist','album','date','genre','composer','discnumber','totaldiscs'):
+                if k in ('artist','albumartist','album','date','tracknumber','genre','composer','discnumber','totaldiscs'):
                     if getattr(track, k) != getattr(draft, k) and k not in track.metadata_overrides:
                         track.metadata_overrides.append(k)
                 setattr(track, k, getattr(draft, k))
@@ -655,32 +681,53 @@ class Studio(BatchActions):
         except ValueError as exc:
             self.message(exc)
             return
+        numbering = self.numbering
         def work():
             service = YouTubeService(self.cache, self.cancel, self.emit, cookies, refresh_scan=refresh_scan)
             self.emit('解析清單中…')
-            entries = service.entries(url, mode)
-            playlist = len(entries) > 1 or bool(service.playlist_info)
+            entries = service.entries(url, mode, numbering)
+            info = service.playlist_info
+            # A one-song release playlist (OLAK…) is a single, not a shared album.
+            playlist = bool(info) and (len(entries) > 1 or info.get('is_releases') or
+                                       bool(info.get('channel_tab')) or not (entries and entries[0].url))
+            playlist_url = info.get('url', '') if playlist else ''
             if playlist:
-                playlist_url = service.playlist_info.get('url')
-                same_playlist = (self.album.is_playlist and self.tracks and
-                                 all(t.playlist_url == playlist_url for t in self.tracks))
-                if not same_playlist or (service.playlist_info.get('is_releases') and not self.album.is_release_collection):
-                    releases = service.playlist_info.get('is_releases', False)
-                    self.album = AlbumInfo(is_playlist=True, is_release_collection=releases,
-                                           title='' if releases else service.playlist_info.get('title') or '',
-                                           cover_source_uid=PER_TRACK_COVER if releases else '')
+                same_playlist = self.album.is_playlist and self.album.playlist_url in ('', playlist_url) and any(
+                    t.playlist_url == playlist_url for t in self.tracks)
+                if not same_playlist or (info.get('is_releases') and not self.album.is_release_collection):
+                    releases = info.get('is_releases', False)
+                    per_track = releases or bool(info.get('channel_tab'))
+                    self.album = AlbumInfo(is_playlist=True, is_release_collection=per_track,
+                                           title='' if per_track else info.get('title') or '',
+                                           cover_source_uid=PER_TRACK_COVER if per_track else '',
+                                           playlist_url=playlist_url,
+                                           completed_temp=list(self.album.completed_temp))
                     self.album_group.value = False
+            elif self.album.is_playlist and not any(self.album.applies_to(t) for t in self.tracks):
+                # Nothing left from the old playlist: drop its shared artist/date/cover.
+                self.album = AlbumInfo(completed_temp=list(self.album.completed_temp))
+                self.shared_cover_uid = ''
+                self.shared_cover_backup = None
             success = skipped = failed = 0
-            for video_url, index, album in entries:
+            for entry in entries:
+                video_url, index = entry.url, entry.index
                 check_cancel(self.cancel)
-                t = next((item for item in self.tracks if
-                          ((item.playlist_url == service.playlist_info.get('url') and
-                            ((item.url == video_url) if video_url else item.tracknumber == str(index))) if playlist else
-                           (item.url == video_url and not item.source))), None)
+                if playlist:
+                    t = next((item for item in self.tracks if item.playlist_url == playlist_url and (
+                        item.url == video_url if video_url else
+                        (item.playlist_index or int(item.tracknumber or 0)) == entry.position)), None)
+                else:
+                    t = next((item for item in self.tracks if item.url == video_url and not item.source), None)
                 is_new = t is None
                 if is_new:
-                    t = Track(url=video_url, tracknumber=str(index), album=album,
-                              playlist_url=service.playlist_info.get('url', '') if playlist else '')
+                    t = Track(url=video_url, tracknumber=str(index), album=entry.album,
+                              playlist_url=playlist_url)
+                elif 'tracknumber' not in t.metadata_overrides and t.tracknumber != str(index):
+                    self.emit(f'{t.title or video_url}：曲號 {t.tracknumber} → {index}')
+                    t.tracknumber = str(index)
+                t.playlist_index = entry.position if playlist else 0
+                if entry.thumbnail:
+                    t.release_thumbnail = entry.thumbnail
                 t.date_from, t.date_to = start, end
                 if is_new:
                     t.auto_clean_titles = cleanup
@@ -712,6 +759,10 @@ class Studio(BatchActions):
                     failed += 1
                     self.emit(f'第 {index} 首失敗：{exc}')
                 save_project(self.project, self.tracks, self.album)
+            if playlist:
+                self.tracks.sort(key=lambda item: (item.playlist_url != playlist_url,
+                                                   int(str(item.tracknumber or 0).split('/')[0] or 0)
+                                                   if item.playlist_url == playlist_url else 0))
             self.emit(f'處理完成：成功 {success} 首、日期範圍外／多首專輯略過 {skipped} 首、失敗 {failed} 首。'
                       '無日期或讀取失敗項目可重試。')
         await self.job(work)
@@ -860,8 +911,13 @@ class Studio(BatchActions):
                           +('成功項目已移出清單；' if auto_clear else '')+'失敗與未處理項目保留。')
             finally:
                 self._cleanup_exported(completed)
+                if self.reset_album_if_empty():
+                    self.emit('清單已清空，專輯資訊與共用封面已重設，下一首不會沿用上一首資料')
                 save_project(self.project, self.tracks, self.album)
         await self.job(work)
+        if not self.tracks:
+            self.left_content.content = self.overview
+        self.album_view.sync()
 
     def _cleanup_exported(self, completed):
         if not completed and not self.album.completed_temp:
@@ -935,7 +991,7 @@ class Studio(BatchActions):
             service = YouTubeService(self.cache, self.cancel, self.emit, cookies)
             available = list(selected)
             count = 0
-            for video_url,index,album in service.entries(url, mode):
+            for video_url,index,album,*_ in service.entries(url, mode, 'source'):
                 check_cancel(self.cancel)
                 try:
                     meta = service.fetch_metadata(video_url,index,album)

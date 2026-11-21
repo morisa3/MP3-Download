@@ -1,7 +1,9 @@
 """Full per-video metadata; playlist owner is never used as the track artist."""
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlparse, parse_qs
+import re
 import threading
 import shutil
 import yt_dlp
@@ -19,6 +21,58 @@ class Cancelled(Exception):
 def check_cancel(event):
     if event.is_set():
         raise Cancelled('已停止')
+
+
+class ListEntry(NamedTuple):
+    """One playable list item. index is the track number; position is the source list slot."""
+    url: str
+    index: int
+    album: str
+    position: int = 0
+    thumbnail: str = ''
+
+
+# Channel tabs that YouTube orders newest first (releases by release date, videos by upload).
+CHANNEL_TABS = ('releases', 'videos', 'streams', 'shorts')
+NUMBERING = ('auto', 'source', 'oldest_first', 'newest_first')
+
+
+def channel_tab(url):
+    parts = urlparse(url).path.rstrip('/').split('/')
+    return parts[-1] if len(parts) > 2 and parts[-1] in CHANNEL_TABS else ''
+
+
+def card_thumbnail(thumbnails):
+    """Largest artwork shown on the releases card."""
+    def area(item):
+        return (item.get('width') or 0) * (item.get('height') or 0)
+    for item in sorted((t for t in thumbnails or [] if isinstance(t, dict) and t.get('url')),
+                       key=area, reverse=True):
+        url = item['url']
+        if url.startswith('//'):
+            url = 'https:' + url
+        if not url.startswith(('https://', 'http://')):
+            continue
+        return url
+    return ''
+
+
+def thumbnail_candidates(url):
+    """Ask Google image hosts for a larger copy first, then fall back to the card URL itself."""
+    larger = re.sub(r'=w\d+-h\d+', '=w1200-h1200', url) if (
+        'googleusercontent.com' in url or 'ggpht.com' in url) else url
+    return [larger] if larger == url else [larger, url]
+
+
+def renumber(result, numbering, tab):
+    """Track numbers follow release order so new songs append instead of shifting old ones."""
+    if numbering == 'auto':
+        numbering = 'oldest_first' if tab else 'source'
+    if numbering == 'source':
+        return result
+    total = len(result)
+    return [entry._replace(index=(total - i if numbering == 'oldest_first' else i + 1))
+            for i, entry in enumerate(result)]
 
 
 def normalize_url(url, mode='auto'):
@@ -116,10 +170,15 @@ class YouTubeService:
             return 'https://www.youtube.com/playlist?list=' + identity
         return ''
 
-    def entries(self, url, mode='auto'):
+    def entries(self, url, mode='auto', numbering='auto'):
         url = normalize_url(url, mode)
         check_cancel(self.cancel)
+        releases = urlparse(url).path.endswith('/releases')
         cached = self._cached('lists', url)
+        if cached and releases and not any(
+                isinstance(e, dict) and 'thumbnails' in e for e in cached['data'].get('entries') or []):
+            # Caches from v1.8.0 lack release-card artwork; re-read the catalogue page once.
+            cached = None
         if cached:
             info = cached['data']
             self.progress(f'讀取掃描快取：{cached["scanned_at"]}；如需新歌曲，請勾選重新掃描')
@@ -131,21 +190,24 @@ class YouTubeService:
                 raise ValueError('無法取得影片或清單資訊')
             if 'entries' in info:
                 info = {'title': info.get('title') or '', 'entries': [
-                    {k: entry.get(k) for k in ('id', 'url', 'webpage_url', 'title', 'ie_key', 'playlist_count')}
+                    {**{k: entry.get(k) for k in ('id', 'url', 'webpage_url', 'title', 'ie_key', 'playlist_count')},
+                     'thumbnails': [{k: t.get(k) for k in ('url', 'width', 'height')}
+                                    for t in entry.get('thumbnails') or [] if isinstance(t, dict) and t.get('url')]}
                     if entry else None for entry in (info.get('entries') or [])]}
                 self._save_scan('lists', url, info)
         if 'entries' not in info:
             self.playlist_info = {}
-            return [(url, 1, '')]
-        releases = urlparse(url).path.endswith('/releases')
-        self.playlist_info = {'url': url, 'title': info.get('title') or '', 'is_releases': releases}
+            return [ListEntry(url, 1, '', 1)]
+        tab = channel_tab(url)
+        self.playlist_info = {'url': url, 'title': info.get('title') or '', 'is_releases': releases,
+                              'channel_tab': tab}
         result = []
         skipped = 0
         for i, entry in enumerate(info.get('entries') or [], 1):
             check_cancel(self.cancel)
             if not entry:
                 self.progress(f'清單第 {i} 項無法解析，已保留重試位置')
-                result.append(('', i, ''))
+                result.append(ListEntry('', i, '', i))
                 continue
             item_url = self.item_url(entry)
             if releases and parse_qs(urlparse(item_url).query).get('list'):
@@ -160,7 +222,9 @@ class YouTubeService:
                 except Exception as exc:
                     self.progress(f'單曲清單第 {i} 項解析失敗，可重試：{exc}')
                     # Keep release URL so a retry can resolve this exact card.
-            result.append((item_url, i, (entry.get('title') or '') if releases else info.get('title') or ''))
+            result.append(ListEntry(item_url, i, (entry.get('title') or '') if releases else info.get('title') or '',
+                                    i, card_thumbnail(entry.get('thumbnails')) if releases else ''))
+        result = renumber(result, numbering if numbering in NUMBERING else 'auto', tab)
         self.progress(f'清單解析完成：保留 {len(result)} 項，略過 {skipped} 個多首專輯')
         return result
 
@@ -205,7 +269,7 @@ class YouTubeService:
 
     def resolve_track(self, track):
         if not track.url and track.playlist_url:
-            track.url = self.resolve_playlist_item(track.playlist_url, int(track.tracknumber))
+            track.url = self.resolve_playlist_item(track.playlist_url, track.source_position())
         if parse_qs(urlparse(track.url).query).get('list'):
             track.url = self.resolve_single_release(track.url)
 
@@ -255,7 +319,7 @@ class YouTubeService:
             return
         check_cancel(self.cancel)
         if not track.url and track.playlist_url:
-            track.url = self.resolve_playlist_item(track.playlist_url, int(track.tracknumber))
+            track.url = self.resolve_playlist_item(track.playlist_url, track.source_position())
         self.progress(f'檢查第 {track.tracknumber} 首發表日期…')
         # Never use the editable album/tag date as evidence of publication date.
         if not track.source_date or (self.refresh_scan and track.url not in self._refreshed_dates):
@@ -304,6 +368,9 @@ class YouTubeService:
             thumbs = sorted(info.get('thumbnails') or [], key=lambda x: (x.get('width') or 0)*(x.get('height') or 0), reverse=True)
             if info.get('thumbnail'):
                 thumbs.append({'url': info['thumbnail']})
+            if track.release_thumbnail:
+                # The releases card artwork can differ from a later-updated MV thumbnail.
+                thumbs[:0] = [{'url': u, 'release': True} for u in thumbnail_candidates(track.release_thumbnail)]
             for thumb in thumbs:
                 check_cancel(self.cancel)
                 try:
@@ -320,6 +387,7 @@ class YouTubeService:
                     im.save(cover, 'JPEG', quality=98, subsampling=0)
                     track.cover = str(cover.resolve())
                     track.bbox = auto_bbox(cover)
+                    track.cover_origin = 'releases' if thumb.get('release') else 'video'
                     break
                 except Exception as exc:
                     self.progress(f'封面候選讀取失敗：{exc}')

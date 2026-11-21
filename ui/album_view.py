@@ -91,6 +91,8 @@ class AlbumView:
                 setattr(album, name, (field.value or '').strip())
             if apply_to_tracks and album.is_playlist:
                 for track in self.studio.tracks:
+                    if not album.applies_to(track):
+                        continue
                     for name in self.fields:
                         value = getattr(album, name)
                         if value:

@@ -24,7 +24,8 @@ def test_dialog_and_overwrite_confirmation(tmp_path,monkeypatch):
     dialog=app.page.dialog
     assert dialog._build_add_commands(indent=0,index={},added_controls=[])
     fields=dialog.content.content.controls
-    fields[4].value='overwrite';fields[4].on_change(None)
-    assert fields[6].visible
+    assert fields[4].value=='gain'  # new loudness method selector
+    fields[5].value='overwrite';fields[5].on_change(None)
+    assert fields[7].visible
     asyncio.run(dialog.actions[2].on_click(None))
     assert '勾選確認' in fields[-1].value

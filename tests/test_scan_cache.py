@@ -9,6 +9,9 @@ SINGLE = 'https://www.youtube.com/playlist?list=OLAKsingle'
 MULTI = 'https://www.youtube.com/playlist?list=OLAKmulti'
 VIDEO = 'https://www.youtube.com/watch?v=abcdefghijk'
 
+def plain(entries):
+    return [(e.url, e.index, e.album) for e in entries]
+
 def mock_ydl(monkeypatch, payloads, calls):
     class Fake:
         def __init__(self, options): self.options = options
@@ -31,14 +34,14 @@ def test_releases_skip_album_and_reuse_across_sessions(tmp_path, monkeypatch):
         VIDEO: {'title':'A', 'channel':'Artist Official', 'upload_date':'20260926'}
     }, calls)
     first=YouTubeService(tmp_path/'temp')
-    assert first.entries(ROOT, 'playlist') == [(VIDEO, 2, 'Single album')]
+    assert plain(first.entries(ROOT, 'playlist', 'source')) == [(VIDEO, 2, 'Single album')]
     assert MULTI not in [x[0] for x in calls]
     assert calls[1][1]['playlistend'] == 2
     track=Track(url=VIDEO, date_from='2026-10', date_to='2026-10')
     with pytest.raises(OutsideDateRange): first.check_date(track)
     assert len(calls)==3
     second=YouTubeService(tmp_path/'other')
-    assert second.entries(ROOT)==[(VIDEO,2,'Single album')]
+    assert plain(second.entries(ROOT))==[(VIDEO,1,'Single album')]  # oldest release = 1
     second.check_date(Track(url=VIDEO, date_from='2026-09',date_to='2026-09'))
     assert len(calls)==3  # no network for catalog, child resolution, or date
     third=YouTubeService(tmp_path/'third',refresh_scan=True)
@@ -61,7 +64,7 @@ def test_failed_release_and_missing_date_are_retryable(tmp_path,monkeypatch):
     payloads={ROOT:{'entries':[{'url':SINGLE}]},SINGLE:ValueError('temporary failure')}
     mock_ydl(monkeypatch,payloads,calls)
     service=YouTubeService(tmp_path)
-    assert service.entries(ROOT)==[(SINGLE,1,'')]
+    assert plain(service.entries(ROOT))==[(SINGLE,1,'')]
     payloads[SINGLE]={'entries':[{'url':VIDEO}]}
     payloads[VIDEO]={'title':'A'}
     track=Track(url=SINGLE,date_from='2026-09',date_to='2026-09')

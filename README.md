@@ -1,12 +1,20 @@
-# EZ Audio Studio v1.8.0
+# EZ Audio Studio v1.9.0
 
 整合 YouTube 單曲／播放清單下載、標籤編輯、封面裁切及內嵌、響度掃描與音訊輸出。沿用 **Python 3.12 + Flet 0.21.2**。
 
 ## 安裝與啟動（Windows）
 
-將 ZIP 解壓到可寫入的資料夾，雙擊 `start.bat`（或 `install.bat`）。第一次會建立 `%LOCALAPPDATA%\EZAudioStudio\venv-py312`，只在缺套件或 Flet 版本不符時安裝依賴；安裝成功後同一次操作直接開啟程式。之後更新程式並解壓到另一個資料夾，也共用這份 Python 環境，不必重新執行完整環境檢查。若需要詳細檢查，才手動執行 `check_environment.py`。
+將 ZIP 解壓到可寫入的資料夾，雙擊 `start.vbs`（不開 cmd 視窗）或 `start.bat`。第一次尚未建立 Python 環境時，`start.vbs` 會自動改開 `start.bat` 顯示安裝進度；之後就不再出現 cmd 視窗，錯誤訊息改以對話框顯示，詳細輸出寫入 `%LOCALAPPDATA%\EZAudioStudio\console.log`。第一次會建立 `%LOCALAPPDATA%\EZAudioStudio\venv-py312`，只在缺套件或 Flet 版本不符時安裝依賴；安裝成功後同一次操作直接開啟程式。之後更新程式並解壓到另一個資料夾，也共用這份 Python 環境，不必重新執行完整環境檢查。若需要詳細檢查，才手動執行 `check_environment.py`。
 
 需安裝 Python 3.12 與 Python Launcher（`py`）。YouTube 網站可能需要 JavaScript runtime；若下載失敗且尚未安裝，可執行 `install_runtime.bat` 安裝 Deno。本包不包含 FFmpeg，請自行放入 `EZAudioStudio\ffmpeg\bin\ffmpeg.exe`。請勿直接在 ZIP 壓縮檔中執行。
+
+## v1.9.0 修正與改進
+
+- **單曲沿用上一首資訊（修正）**：清單轉檔完自動清空後，專輯名稱、歌手、日期、共用封面不再殘留；之後貼的單曲網址也不會被套上前一份清單（第一首）的資訊與封面。共用資訊只套用到同一個清單網址的歌曲。只有一首的 OLAK 單曲清單視為單曲處理。
+- **releases 封面**：`/releases` 讀取時保存卡片上的封面，下載時優先使用（Google 圖床會先要求 1200×1200 大圖），失敗才退回影片縮圖。舊版 list 快取沒有卡片封面，第一次會自動重讀 releases 頁一次（只讀目錄，不重查各首）。
+- **依發行時間編號**：「下載設定 → 曲目編號」預設「自動」：頻道 `/releases`、`/videos` 頁依頁面順序（新到舊）反推，最舊為 1，新歌接在最後，舊歌曲號不變；一般播放清單照原順序。也可選最新為 1 或照來源順序。重新掃描時，清單中尚未輸出的歌曲曲號一併更新（在歌曲詳情手動改過曲號的保留）。重試仍依來源清單位置，不受重新編號影響。
+- **響度一致性**：新增「校正方式」，預設「增益＋限幅」。整首只調一個固定音量；峰值會超過 True peak 時才以 4 倍取樣限幅；輸出後再量一次，偏差超過 0.5 LU 自動補正重轉一次。舊的 loudnorm 仍可選；若 loudnorm 對某首改用動態壓縮，該曲會出現警告。響度調整對話框同樣可選。
+- `update_downloader.bat` 改用與 start.bat 相同的共用 Python 環境。
 
 ## v1.8.0 封面縮圖與獨立響度調整
 

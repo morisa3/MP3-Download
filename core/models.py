@@ -36,6 +36,15 @@ class Track:
     date_to: str = ''
     auto_clean_titles: bool = True
     metadata_overrides: list = field(default_factory=list)
+    playlist_index: int = 0
+    release_thumbnail: str = ''
+    cover_origin: str = ''
+
+    def source_position(self):
+        """Original slot in the source list; track numbers may be renumbered by release order."""
+        if self.playlist_index:
+            return int(self.playlist_index)
+        return int(str(self.tracknumber).split('/')[0])
 
 
 @dataclass
@@ -55,13 +64,18 @@ class AlbumInfo:
     bbox: list = field(default_factory=list)
     cover_source_uid: str = ''
     completed_temp: list = field(default_factory=list)
+    playlist_url: str = ''
+
+    def applies_to(self, track):
+        """Shared fields belong only to songs from this playlist, never to later singles."""
+        return self.is_playlist and (not self.playlist_url or track.playlist_url == self.playlist_url)
 
 
 def effective_track(track, album):
     """Keep song fields while applying the explicitly edited shared fields."""
     from copy import copy
     result = copy(track)
-    if album and album.is_playlist:
+    if album and album.applies_to(track):
         for name in ('artist', 'albumartist', 'date', 'genre', 'composer',
                      'discnumber', 'totaldiscs'):
             value = getattr(album, name)

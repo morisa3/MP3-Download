@@ -12,6 +12,13 @@ from .tags import write_tags, verify_embedded_cover
 from .crop import save_cover
 from .naming import filename, output_path, validate_template
 
+LOUDNESS_MODES = ('gain', 'loudnorm')
+# Lossy encoders add inter-sample overs; the limiter keeps this much extra headroom.
+LIMITER_MARGIN = 0.5
+# After verification, a song further than this from the target is re-encoded once.
+CORRECTION_TOLERANCE = 0.5
+
+
 @dataclass
 class OutputSettings:
     folder: str
@@ -22,6 +29,9 @@ class OutputSettings:
     lufs: float = -14.0
     true_peak: float = -1.0
     lra: float = 11.0
+    # 'gain': one linear gain (+ true-peak limiter only when needed), verified and corrected once.
+    # 'loudnorm': FFmpeg loudnorm two-pass; may silently switch to dynamic mode on some songs.
+    loudness_mode: str = 'gain'
     cover_size: int = 720
     naming: str = '<曲目歌星>-<標題>'
     embed_cover: bool = True
@@ -35,6 +45,8 @@ class OutputSettings:
             raise ValueError('不支援的輸出格式')
         if not -70 <= self.lufs <= -5 or not -9 <= self.true_peak <= 0 or not 1 <= self.lra <= 50:
             raise ValueError('LUFS 範圍 -70～-5；True peak -9～0；LRA 1～50')
+        if self.loudness_mode not in LOUDNESS_MODES:
+            raise ValueError('未知的響度校正方式')
         if self.sample_rate not in (44100, 48000):
             raise ValueError('取樣率限 44100 或 48000')
         if self.bitrate not in ('128k', '192k', '256k', '320k'):
@@ -98,6 +110,81 @@ def loudness_filter(stats, s):
             f':offset={stats["target_offset"]}:linear=true:print_format=json')
 
 
+def _finite(stats, *keys):
+    try:
+        return all(math.isfinite(float(stats[k])) for k in keys)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def gain_filter(stats, s, correction=0.0):
+    """Static gain to the target. Only peaks that would exceed True peak are limited."""
+    if not _finite(stats, 'input_i', 'input_tp'):
+        return None
+    gain = s.lufs - float(stats['input_i']) + correction
+    if float(stats['input_tp']) + gain <= s.true_peak:
+        return f'volume={gain:.2f}dB'
+    limit = 10 ** ((s.true_peak - LIMITER_MARGIN) / 20)
+    # 4x oversampling approximates true-peak limiting; the encoder resamples to the output rate.
+    return (f'volume={gain:.2f}dB,aresample=192000,'
+            f'alimiter=limit={limit:.4f}:attack=5:release=50:level=0')
+
+
+def build_loudness_filter(stats, s, correction=0.0):
+    if s.loudness_mode == 'loudnorm':
+        return loudness_filter(stats, s)
+    return gain_filter(stats, s, correction)
+
+
+def limiter_gain_reduction(stats, s):
+    """dB the limiter must remove from the loudest peak (0 when plain gain is enough)."""
+    if not _finite(stats, 'input_i', 'input_tp'):
+        return 0.0
+    over = float(stats['input_tp']) + s.lufs - float(stats['input_i']) - (s.true_peak - LIMITER_MARGIN)
+    return max(0.0, over)
+
+
+def normalization_type(log):
+    """loudnorm reports whether it really ran linear or fell back to dynamic compression."""
+    found = re.findall(r'"normalization_type"\s*:\s*"(\w+)"', log or '')
+    return found[-1] if found else ''
+
+
+def encode_normalized(encode, stats, settings, measure_output, cancel=None):
+    """Encode with loudness correction, verify, and re-encode once if still off target.
+
+    encode(filter_or_None) -> FFmpeg log; measure_output() -> loudnorm stats of the encoded file.
+    Returns (verification stats or None, notes dict, warnings list).
+    """
+    notes, warnings = {'method': settings.loudness_mode}, []
+    filt = build_loudness_filter(stats, settings)
+    if not filt:
+        encode(None)
+        return None, notes, ['靜音或無有效響度，未套用增益']
+    log = encode(filt)
+    if settings.loudness_mode == 'loudnorm':
+        kind = normalization_type(log)
+        notes['normalization_type'] = kind
+        if kind == 'dynamic':
+            warnings.append('loudnorm 對此曲改用動態壓縮（峰值或動態範圍超出限制），響度可能與其他歌曲不一致；'
+                            '建議改用「增益＋限幅」')
+    else:
+        reduction = limiter_gain_reduction(stats, settings)
+        notes['gain_db'] = round(settings.lufs - float(stats['input_i']), 2)
+        notes['limiter_db'] = round(reduction, 2)
+        if reduction > 6:
+            warnings.append(f'此曲需壓限峰值約 {reduction:.1f} dB 才能達到目標，'
+                            '動態範圍大；可降低目標 LUFS 讓整份清單更一致')
+    after = measure_output()
+    if (settings.loudness_mode == 'gain' and _finite(after, 'input_i') and
+            abs(float(after['input_i']) - settings.lufs) > CORRECTION_TOLERANCE):
+        correction = settings.lufs - float(after['input_i'])
+        notes['correction_db'] = round(correction, 2)
+        encode(build_loudness_filter(stats, settings, correction))
+        after = measure_output()
+    return after, notes, warnings
+
+
 def export_track(track, settings, cancel=None, progress=lambda x: None):
     folder = settings.validate()
     validate_track(track)
@@ -123,23 +210,37 @@ def export_track(track, settings, cancel=None, progress=lambda x: None):
         with tempfile.TemporaryDirectory(prefix='.ez-', dir=temp_directory()) as tmp:
             temp = Path(tmp)
             encoded = temp / ('output.'+settings.format)
-            args = [ffmpeg_path(), '-hide_banner', '-nostdin', '-y', '-i', track.source,
-                    '-map', '0:a:0', '-vn', '-map_metadata', '-1']
-            if settings.normalize:
-                progress('掃描響度')
-                track.measurement = measure(track.source, settings, cancel)
-                filt = loudness_filter(track.measurement, settings)
-                if filt:
-                    args += ['-af', filt]
-                else:
-                    track.warning += '；靜音或無有效響度，未套用增益'
             codecs = {'mp3': ['-c:a', 'libmp3lame', '-b:a', settings.bitrate],
                       'm4a': ['-c:a', 'aac', '-b:a', settings.bitrate],
                       'flac': ['-c:a', 'flac', '-sample_fmt', 's32'],
                       'wav': ['-c:a', 'pcm_s24le']}
-            args += codecs[settings.format] + ['-ar', str(settings.sample_rate), str(encoded)]
-            progress('校正響度／轉檔')
-            run(args, cancel)
+            def encode(filt):
+                args = [ffmpeg_path(), '-hide_banner', '-nostdin', '-y', '-i', track.source,
+                        '-map', '0:a:0', '-vn', '-map_metadata', '-1']
+                if filt:
+                    args += ['-af', filt]
+                args += codecs[settings.format] + ['-ar', str(settings.sample_rate), str(encoded)]
+                progress('校正響度／轉檔' if filt else '轉檔')
+                return run(args, cancel)
+            if settings.normalize:
+                progress('掃描響度')
+                track.measurement = measure(track.source, settings, cancel)
+                def verify():
+                    progress('驗證輸出響度')
+                    return measure(encoded, settings, cancel)
+                after, notes, warnings = encode_normalized(encode, track.measurement, settings, verify, cancel)
+                track.measurement['normalization'] = notes
+                for text in warnings:
+                    track.warning += '；' + text
+                if after is not None:
+                    # Measured on the encoded result: lossy codecs can shift loudness and true peak.
+                    track.measurement['output_verification'] = after
+                    if _finite(after, 'input_i') and abs(float(after['input_i'])-settings.lufs) > 1:
+                        track.warning += '；輸出響度與目標差距 >1 LU，請查看歌曲資訊／響度紀錄'
+                    if _finite(after, 'input_tp') and float(after['input_tp']) > settings.true_peak+.3:
+                        track.warning += '；編碼後峰值偏高，可降低 True peak 後重試'
+            else:
+                encode(None)
             cover = None
             source_cover = settings.shared_cover or track.cover
             source_bbox = settings.shared_bbox if settings.shared_cover else track.bbox
@@ -149,15 +250,6 @@ def export_track(track, settings, cancel=None, progress=lambda x: None):
             write_tags(encoded, track, cover if settings.embed_cover else None)
             if cover and settings.embed_cover:
                 verify_embedded_cover(encoded, cover)
-            # Measure encoded result as lossy codecs can shift loudness and true peak.
-            if settings.normalize:
-                progress('驗證輸出響度')
-                after = measure(encoded, settings, cancel)
-                track.measurement['output_verification'] = after
-                if math.isfinite(float(after['input_i'])) and abs(float(after['input_i'])-settings.lufs) > 1:
-                    track.warning += '；輸出響度與目標差距 >1 LU，請查看歌曲資訊／響度紀錄'
-                if float(after['input_tp']) > settings.true_peak+.3:
-                    track.warning += '；編碼後峰值偏高，可降低 True peak 後重試'
             # The app temp directory and chosen output may be on different drives.
             # Copy into our exclusively reserved destination; finally removes it on failure.
             shutil.copyfile(encoded, dest)

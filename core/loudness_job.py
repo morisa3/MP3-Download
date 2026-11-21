@@ -8,7 +8,7 @@ import tempfile
 from mutagen import File
 from mutagen.id3 import ID3
 from mutagen.flac import FLAC
-from .audio import OutputSettings, measure, loudness_filter
+from .audio import OutputSettings, measure, build_loudness_filter, encode_normalized
 from .system import ffmpeg_path, run, temp_directory
 from .youtube import check_cancel
 
@@ -90,28 +90,31 @@ def _encoding(source):
     else: raise ValueError('響度調整不支援此格式')
     return codec + ['-ar',str(rate)], float(getattr(info,'length',0))
 
-def normalize_file(source, lufs, peak, overwrite, folder, cancel, progress=lambda text:None):
+def normalize_file(source, lufs, peak, overwrite, folder, cancel, progress=lambda text:None, mode='gain'):
     validate_targets(lufs, peak)
     source = Path(source).resolve()
     if not source.is_file() or source.suffix.lower() not in SUPPORTED:
         raise ValueError('找不到來源或不支援的格式')
     initial = source.stat()
-    settings = OutputSettings(folder=str(source.parent), lufs=lufs, true_peak=peak)
+    settings = OutputSettings(folder=str(source.parent), lufs=lufs, true_peak=peak, loudness_mode=mode)
     check_cancel(cancel)
     progress('掃描原始響度')
     before = measure(source, settings, cancel)
-    filt = loudness_filter(before, settings)
-    if not filt:
+    if not build_loudness_filter(before, settings):
         raise ValueError('靜音或無有效響度，原檔保持不變')
     encoding, duration = _encoding(source)
     with tempfile.TemporaryDirectory(prefix='loudness-', dir=temp_directory()) as tmp:
         encoded = Path(tmp)/('normalized'+source.suffix.lower())
-        progress('調整響度')
-        run([ffmpeg_path(),'-hide_banner','-nostdin','-y','-i',str(source),
-             '-map','0:a:0','-vn','-map_metadata','0','-af',filt,*encoding,str(encoded)],cancel)
+        def encode(filt):
+            progress('調整響度')
+            return run([ffmpeg_path(),'-hide_banner','-nostdin','-y','-i',str(source),
+                        '-map','0:a:0','-vn','-map_metadata','0','-af',filt,*encoding,str(encoded)],cancel)
+        def verify():
+            progress('驗證輸出響度')
+            return measure(encoded, settings, cancel)
+        after, notes, warnings = encode_normalized(encode, before, settings, verify, cancel)
+        after = dict(after, normalization=notes, warnings=warnings)
         _copy_tags(source, encoded)
-        progress('驗證輸出響度')
-        after = measure(encoded, settings, cancel)
         result = File(encoded)
         if result is None or abs(result.info.length-duration)>max(0.25, duration*0.005):
             raise RuntimeError('輸出長度驗證失敗，原檔保持不變')

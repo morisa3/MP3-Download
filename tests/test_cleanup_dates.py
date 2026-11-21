@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.text_cleanup import clean_artist, clean_title
 from core.date_filter import DateRange, OutsideDateRange
 from core.models import Track, AlbumInfo, save_project, load_session, effective_track
-from core.youtube import metadata, YouTubeService, Cancelled
+from core.youtube import metadata, YouTubeService, Cancelled, ListEntry
 from ui.main_view import Studio
 from ui.album_view import PER_TRACK_COVER
 from test_ui import FakePage
@@ -138,7 +138,7 @@ def test_ui_scans_unsorted_list_and_downloads_only_matches(tmp_path,monkeypatch)
     monkeypatch.setattr(module,'DATA',tmp_path/'data')
     service=YouTubeService(tmp_path/'temp')
     service.playlist_info={'url':'https://youtube.com/playlist?list=PL123','title':'Album'}
-    service.entries=lambda *a:[('https://youtube.com/watch?v='+str(i),i,'Album') for i in (1,2,3,4)]
+    service.entries=lambda *a:[ListEntry('https://youtube.com/watch?v='+str(i),i,'Album',i) for i in (1,2,3,4)]
     dates={1:'2026-08-31',2:'2026-09-30',3:'2026-10-01',4:'2026-09-01'}
     service.fetch_metadata=lambda url,index,album:Track(source_date=dates[int(index)])
     downloaded=[]
