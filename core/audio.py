@@ -12,7 +12,9 @@ from .tags import write_tags, verify_embedded_cover
 from .crop import save_cover
 from .naming import filename, output_path, validate_template
 
-LOUDNESS_MODES = ('gain', 'loudnorm')
+LOUDNESS_MODES = ('list', 'gain', 'loudnorm')
+# 'list' never goes below this; songs that cannot reach it unlimited are outliers instead.
+LIST_TARGET_FLOOR = -18.0
 # Lossy encoders add inter-sample overs; the limiter keeps this much extra headroom.
 LIMITER_MARGIN = 0.5
 # After verification, a song further than this from the target is re-encoded once.
@@ -29,6 +31,7 @@ class OutputSettings:
     lufs: float = -14.0
     true_peak: float = -1.0
     lra: float = 11.0
+    # 'list': one common target for the selected songs, chosen so every song needs only plain gain.
     # 'gain': one linear gain (+ true-peak limiter only when needed), verified and corrected once.
     # 'loudnorm': FFmpeg loudnorm two-pass; may silently switch to dynamic mode on some songs.
     loudness_mode: str = 'gain'
@@ -117,11 +120,34 @@ def _finite(stats, *keys):
         return False
 
 
+def gain_ceiling(stats, s):
+    """Highest gain that keeps the true peak (with encoder headroom) under the limit."""
+    return s.true_peak - LIMITER_MARGIN - float(stats['input_tp'])
+
+
+def list_target(measurements, s):
+    """Loudest common LUFS every song reaches by plain gain alone, capped at the chosen LUFS.
+
+    Returns (target, outliers): outliers are indexes of songs that cannot reach even the floor
+    without limiting. They do not pull the whole list down; they stay unlimited and end up
+    quieter, with a warning."""
+    reachable = [float(m['input_i']) + gain_ceiling(m, s) if _finite(m, 'input_i', 'input_tp') else None
+                 for m in measurements]
+    floor = min(LIST_TARGET_FLOOR, s.lufs)
+    valid = [r for r in reachable if r is not None and r >= floor]
+    target = max(min([s.lufs, *valid]), floor)
+    outliers = [i for i, r in enumerate(reachable) if r is not None and r < target - 0.05]
+    return round(target, 1), outliers
+
+
 def gain_filter(stats, s, correction=0.0):
     """Static gain to the target. Only peaks that would exceed True peak are limited."""
     if not _finite(stats, 'input_i', 'input_tp'):
         return None
     gain = s.lufs - float(stats['input_i']) + correction
+    if s.loudness_mode == 'list':
+        # Never alter the waveform: stop at the peak ceiling instead of limiting.
+        return f'volume={min(gain, gain_ceiling(stats, s)):.2f}dB'
     if float(stats['input_tp']) + gain <= s.true_peak:
         return f'volume={gain:.2f}dB'
     limit = 10 ** ((s.true_peak - LIMITER_MARGIN) / 20)
@@ -168,6 +194,12 @@ def encode_normalized(encode, stats, settings, measure_output, cancel=None):
         if kind == 'dynamic':
             warnings.append('loudnorm 對此曲改用動態壓縮（峰值或動態範圍超出限制），響度可能與其他歌曲不一致；'
                             '建議改用「增益＋限幅」')
+    elif settings.loudness_mode == 'list':
+        notes['gain_db'] = round(min(settings.lufs - float(stats['input_i']), gain_ceiling(stats, settings)), 2)
+        notes['list_target'] = settings.lufs
+        if settings.lufs - float(stats['input_i']) > gain_ceiling(stats, settings) + 0.05:
+            notes['capped'] = True
+            warnings.append('此曲峰值過高，不壓縮峰值無法達到清單目標，會比其他歌曲小聲')
     else:
         reduction = limiter_gain_reduction(stats, settings)
         notes['gain_db'] = round(settings.lufs - float(stats['input_i']), 2)
@@ -176,7 +208,8 @@ def encode_normalized(encode, stats, settings, measure_output, cancel=None):
             warnings.append(f'此曲需壓限峰值約 {reduction:.1f} dB 才能達到目標，'
                             '動態範圍大；可降低目標 LUFS 讓整份清單更一致')
     after = measure_output()
-    if (settings.loudness_mode == 'gain' and _finite(after, 'input_i') and
+    capped = notes.get('capped', False)  # already at the peak ceiling: a retry cannot help
+    if (settings.loudness_mode in ('gain', 'list') and not capped and _finite(after, 'input_i') and
             abs(float(after['input_i']) - settings.lufs) > CORRECTION_TOLERANCE):
         correction = settings.lufs - float(after['input_i'])
         notes['correction_db'] = round(correction, 2)
@@ -185,7 +218,7 @@ def encode_normalized(encode, stats, settings, measure_output, cancel=None):
     return after, notes, warnings
 
 
-def export_track(track, settings, cancel=None, progress=lambda x: None):
+def export_track(track, settings, cancel=None, progress=lambda x: None, source_stats=None):
     folder = settings.validate()
     validate_track(track)
     if not Path(track.source).is_file():
@@ -223,8 +256,11 @@ def export_track(track, settings, cancel=None, progress=lambda x: None):
                 progress('校正響度／轉檔' if filt else '轉檔')
                 return run(args, cancel)
             if settings.normalize:
-                progress('掃描響度')
-                track.measurement = measure(track.source, settings, cancel)
+                if source_stats and _finite(source_stats, 'input_i', 'input_tp'):
+                    track.measurement = dict(source_stats)  # measured moments ago for the list target
+                else:
+                    progress('掃描響度')
+                    track.measurement = measure(track.source, settings, cancel)
                 def verify():
                     progress('驗證輸出響度')
                     return measure(encoded, settings, cancel)
@@ -235,7 +271,8 @@ def export_track(track, settings, cancel=None, progress=lambda x: None):
                 if after is not None:
                     # Measured on the encoded result: lossy codecs can shift loudness and true peak.
                     track.measurement['output_verification'] = after
-                    if _finite(after, 'input_i') and abs(float(after['input_i'])-settings.lufs) > 1:
+                    if (not notes.get('capped') and _finite(after, 'input_i') and
+                            abs(float(after['input_i'])-settings.lufs) > 1):
                         track.warning += '；輸出響度與目標差距 >1 LU，請查看歌曲資訊／響度紀錄'
                     if _finite(after, 'input_tp') and float(after['input_tp']) > settings.true_peak+.3:
                         track.warning += '；編碼後峰值偏高，可降低 True peak 後重試'

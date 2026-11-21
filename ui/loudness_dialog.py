@@ -23,7 +23,9 @@ def show_loudness_dialog(studio, e=None):
     lufs=ft.TextField(label='目標響度 LUFS',value=studio.lufs.value,expand=True)
     peak=ft.TextField(label='True peak 上限 dBTP',value=studio.peak.value,expand=True)
     method=ft.Dropdown(label='校正方式',value=getattr(studio.loudness_mode,'value','gain') or 'gain',options=[
-        ft.dropdown.Option('gain','增益＋限幅（建議，清單音量一致）'),ft.dropdown.Option('loudnorm','FFmpeg loudnorm（舊方式）')])
+        ft.dropdown.Option('lossless','MP3 無損調整（不重新編碼，1.5 dB 一級）'),
+        ft.dropdown.Option('gain','增益＋限幅（重新編碼）'),ft.dropdown.Option('loudnorm','FFmpeg loudnorm（舊方式）')])
+    method.value='lossless'
     acknowledgment=ft.Checkbox(label='我確認以調整後的音訊覆蓋所選原檔',value=False,visible=False)
     error=ft.Text(color='red')
     def selected_folder(event):
@@ -112,7 +114,9 @@ def show_loudness_dialog(studio, e=None):
             tooltip='選擇歌曲資料夾',on_click=lambda e:source_picker.get_directory_path())]),recursive,
             ft.Row([lufs,peak]),method,mode,ft.Row([target,ft.IconButton(ft.icons.FOLDER_OPEN,
             tooltip='選擇另存位置',on_click=lambda e:output_picker.get_directory_path())]),acknowledgment,
-            ft.Text('支援 MP3、M4A、FLAC、WAV、OGG、OPUS。保留檔案格式與原內嵌封面；MP3／AAC 等有損格式會重新編碼。'),
+            ft.Text('MP3 無損調整只改寫音量欄位，不解碼也不重新編碼，音質完全不變，可再反向調回；'
+                    '以 1.5 dB 為一級，結果與目標最多差約 0.75 LU，且不壓縮峰值。非 MP3 檔案在此模式會略過。'),
+            ft.Text('其他方式支援 MP3、M4A、FLAC、WAV、OGG、OPUS，保留格式與原內嵌封面；MP3／AAC 等有損格式會重新編碼。'),
             ft.Text('僅掃描不修改檔案。覆蓋會在驗證完成後替換原檔，沒有另留備份；另存檔名會加「_響度調整」。'),
             error],tight=True,scroll=ft.ScrollMode.AUTO)),actions=[
             ft.TextButton('取消',on_click=lambda e:close_dialog(page,dialog)),

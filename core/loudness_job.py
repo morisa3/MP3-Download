@@ -11,6 +11,7 @@ from mutagen.flac import FLAC
 from .audio import OutputSettings, measure, build_loudness_filter, encode_normalized
 from .system import ffmpeg_path, run, temp_directory
 from .youtube import check_cancel
+from .mp3gain import apply_gain_file, steps_for, STEP_DB
 
 SUPPORTED = {'.mp3', '.m4a', '.flac', '.wav', '.ogg', '.opus'}
 
@@ -95,6 +96,8 @@ def normalize_file(source, lufs, peak, overwrite, folder, cancel, progress=lambd
     source = Path(source).resolve()
     if not source.is_file() or source.suffix.lower() not in SUPPORTED:
         raise ValueError('找不到來源或不支援的格式')
+    if mode == 'lossless' and source.suffix.lower() != '.mp3':
+        raise ValueError('無損調整只支援 MP3；其他格式請改用「增益＋限幅」（會重新編碼）')
     initial = source.stat()
     settings = OutputSettings(folder=str(source.parent), lufs=lufs, true_peak=peak, loudness_mode=mode)
     check_cancel(cancel)
@@ -102,18 +105,28 @@ def normalize_file(source, lufs, peak, overwrite, folder, cancel, progress=lambd
     before = measure(source, settings, cancel)
     if not build_loudness_filter(before, settings):
         raise ValueError('靜音或無有效響度，原檔保持不變')
-    encoding, duration = _encoding(source)
+    encoding, duration = _encoding(source)  # duration is checked for every mode
     with tempfile.TemporaryDirectory(prefix='loudness-', dir=temp_directory()) as tmp:
         encoded = Path(tmp)/('normalized'+source.suffix.lower())
-        def encode(filt):
-            progress('調整響度')
-            return run([ffmpeg_path(),'-hide_banner','-nostdin','-y','-i',str(source),
-                        '-map','0:a:0','-vn','-map_metadata','0','-af',filt,*encoding,str(encoded)],cancel)
         def verify():
             progress('驗證輸出響度')
             return measure(encoded, settings, cancel)
-        after, notes, warnings = encode_normalized(encode, before, settings, verify, cancel)
-        after = dict(after, normalization=notes, warnings=warnings)
+        if mode == 'lossless':
+            steps = steps_for(lufs, peak, before['input_i'], before['input_tp'])
+            progress(f'無損調整 {steps * STEP_DB:+.1f} dB（不重新編碼）')
+            frames = apply_gain_file(source, encoded, steps)
+            warnings = []
+            if abs(float(before['input_i']) + steps * STEP_DB - lufs) > STEP_DB / 2 + 0.05:
+                warnings.append('峰值限制下無法再提高音量（無損模式不壓縮峰值），此曲會比目標小聲')
+            notes = {'method': 'lossless', 'steps': steps, 'gain_db': steps * STEP_DB, 'frames': frames}
+            after = dict(verify(), normalization=notes, warnings=warnings)
+        else:
+            def encode(filt):
+                progress('調整響度')
+                return run([ffmpeg_path(),'-hide_banner','-nostdin','-y','-i',str(source),
+                            '-map','0:a:0','-vn','-map_metadata','0','-af',filt,*encoding,str(encoded)],cancel)
+            after, notes, warnings = encode_normalized(encode, before, settings, verify, cancel)
+            after = dict(after, normalization=notes, warnings=warnings)
         _copy_tags(source, encoded)
         result = File(encoded)
         if result is None or abs(result.info.length-duration)>max(0.25, duration*0.005):

@@ -24,7 +24,7 @@ def test_dialog_and_overwrite_confirmation(tmp_path,monkeypatch):
     dialog=app.page.dialog
     assert dialog._build_add_commands(indent=0,index={},added_controls=[])
     fields=dialog.content.content.controls
-    assert fields[4].value=='gain'  # new loudness method selector
+    assert fields[4].value=='lossless'  # lossless MP3 is the default
     fields[5].value='overwrite';fields[5].on_change(None)
     assert fields[7].visible
     asyncio.run(dialog.actions[2].on_click(None))

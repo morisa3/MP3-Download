@@ -85,7 +85,7 @@ def test_default_editable_output_and_clear_list(tmp_path,monkeypatch):
     assert app.toolbar is app.body.controls[1]
     assert app.body.controls[2] is app.workspace
     assert app.auto_clear in app.settings_panel.controls
-    assert 'v1.10.0' in app.page.title
+    assert 'v1.11.0' in app.page.title
     assert app.folder.value == r'E:\download' and not app.folder.read_only
     app.folder.value=str(tmp_path/'another path')
     assert app.settings().folder == str(tmp_path/'another path')
@@ -148,6 +148,7 @@ def test_success_removed_failure_retained_with_shared_cover(tmp_path,monkeypatch
     monkeypatch.setattr(module,'DATA',tmp_path)
     monkeypatch.setattr(module,'OUTPUT_DIRECTORY',str(tmp_path/'out'))
     app=Studio(FakePage())
+    app.loudness_mode.value='gain'  # fake sources: skip list-wide measuring
     cover=tmp_path/'cover.jpg'
     Image.new('RGB',(540,540),'blue').save(cover)
     first=Track(title='Success',source='source1',cover=str(cover),bbox=[0,0,540,540])
@@ -173,6 +174,7 @@ def test_auto_clear_can_be_disabled(tmp_path,monkeypatch):
     monkeypatch.setattr(module,'DATA',tmp_path)
     monkeypatch.setattr(module,'OUTPUT_DIRECTORY',str(tmp_path/'out'))
     app=Studio(FakePage())
+    app.loudness_mode.value='gain'  # fake sources: skip list-wide measuring
     app.embed.value=False
     app.auto_clear.value=False
     app.tracks=[Track(title='Keep',source='fake')]

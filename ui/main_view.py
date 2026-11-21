@@ -53,7 +53,7 @@ def action_button(text, icon, handler, color=COLOR_PRIMARY):
 
 
 OUTPUT_DIRECTORY = r'E:\download'
-APP_VERSION = '1.10.0'
+APP_VERSION = '1.11.0'
 
 
 class Studio(BatchActions):
@@ -93,10 +93,13 @@ class Studio(BatchActions):
         self.norm = ft.Checkbox(label='自動校正響度', value=True)
         self.lufs = ft.TextField(label='LUFS', value='-14', width=95)
         self.peak = ft.TextField(label='True peak', value='-1', width=105)
-        self.loudness_mode = ft.Dropdown(label='校正方式', value='gain', width=150,
-            tooltip='增益＋限幅：整首只調一個音量，峰值超出才限幅，並驗證後再微調一次。\n'
+        self.loudness_mode = ft.Dropdown(label='校正方式', value='list', width=150,
+            tooltip='清單統一：先量整批勾選歌曲，自動選一個每首都只需調音量、不必壓縮峰值的共同目標'
+                    '（不高於 LUFS 欄；整體可能比 -14 小聲）。\n'
+                    '增益＋限幅：每首都達到 LUFS 欄，峰值超出的歌曲會被限幅。\n'
                     'loudnorm：舊方式，部分歌曲會被自動改成動態壓縮，音量可能不一致。',
-            options=[ft.dropdown.Option('gain', '增益＋限幅'), ft.dropdown.Option('loudnorm', 'loudnorm（舊）')])
+            options=[ft.dropdown.Option('list', '清單統一'), ft.dropdown.Option('gain', '增益＋限幅'),
+                     ft.dropdown.Option('loudnorm', 'loudnorm（舊）')])
         self.naming = ft.TextField(label='檔名格式', value='<曲目歌星>-<標題>', expand=True)
         self.shared_cover_uid = ''
         self.shared_cover_backup = None
@@ -408,7 +411,7 @@ class Studio(BatchActions):
         common_bbox = self.album.bbox if self.album.is_playlist else (shared.bbox if shared else [])
         return OutputSettings(folder=folder, format=self.format.value, bitrate=self.bitrate.value,
             sample_rate=int(self.rate.value), normalize=self.norm.value, lufs=float(self.lufs.value),
-            true_peak=float(self.peak.value), loudness_mode=self.loudness_mode.value or 'gain', cover_size=int(self.size.value), naming=self.naming.value,
+            true_peak=float(self.peak.value), loudness_mode=self.loudness_mode.value or 'list', cover_size=int(self.size.value), naming=self.naming.value,
             embed_cover=self.embed.value,extra_covers=self.extra_covers.value,write_report=self.reports.value,
             shared_cover=common_cover,shared_bbox=list(common_bbox or auto_bbox(common_cover)) if common_cover else [])
 
@@ -919,15 +922,19 @@ class Studio(BatchActions):
             return
         auto_clear = self.auto_clear.value
         def work():
+            nonlocal settings
             success = 0
             completed = []
+            stats = {}
+            if settings.normalize and settings.loudness_mode == 'list':
+                settings, stats = self._list_loudness_target(selected, settings)
             try:
                 for i,t in enumerate(selected, 1):
                     check_cancel(self.cancel)
                     try:
                         item = effective_track(t, self.album)
                         dest = export_track(item, settings, self.cancel,
-                            lambda msg: self.emit(f'{i}/{len(selected)} {t.title}：{msg}'))
+                            lambda msg: self.emit(f'{i}/{len(selected)} {t.title}：{msg}'), stats.get(t.uid))
                         t.status, t.output, t.measurement = '完成', str(dest), item.measurement
                         success += 1
                         completed.append(t)
@@ -952,6 +959,29 @@ class Studio(BatchActions):
         if not self.tracks:
             self.left_content.content = self.overview
         self.album_view.sync()
+
+    def _list_loudness_target(self, tracks, settings):
+        """Measure every selected song, then use one target none of them needs limiting for."""
+        from dataclasses import replace
+        from core.audio import list_target
+        stats = {}
+        for i, t in enumerate(tracks, 1):
+            check_cancel(self.cancel)
+            # Downloads were already measured once; the source file itself never changes.
+            current = t.measurement if t.measurement.get('input_tp') not in (None, '') else None
+            if current is None:
+                self.emit(f'清單統一響度：測量 {i}/{len(tracks)} {t.title}')
+                current = measure(t.source, settings, self.cancel)
+                t.measurement = current
+            stats[t.uid] = current
+        target, outliers = list_target([stats[t.uid] for t in tracks], settings)
+        self.emit(f'清單統一目標：{target} LUFS（LUFS 欄 {settings.lufs}；每首只調音量、不壓縮峰值）')
+        if target < settings.lufs:
+            self.emit(f'有歌曲峰值較高，整份清單降到 {target} LUFS 才能都不限幅；'
+                      f'之後要分批輸出且保持一致，請把 LUFS 欄改成 {target}')
+        for index in outliers:
+            self.emit(f'{tracks[index].title}：峰值過高，低於 {target} LUFS 也無法不限幅，會比其他歌小聲')
+        return replace(settings, lufs=target), stats
 
     def _cleanup_exported(self, completed):
         if not completed and not self.album.completed_temp:
