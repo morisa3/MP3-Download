@@ -85,7 +85,7 @@ def test_default_editable_output_and_clear_list(tmp_path,monkeypatch):
     assert app.toolbar is app.body.controls[1]
     assert app.body.controls[2] is app.workspace
     assert app.auto_clear in app.settings_panel.controls
-    assert 'v1.9.0' in app.page.title
+    assert 'v1.10.0' in app.page.title
     assert app.folder.value == r'E:\download' and not app.folder.read_only
     app.folder.value=str(tmp_path/'another path')
     assert app.settings().folder == str(tmp_path/'another path')

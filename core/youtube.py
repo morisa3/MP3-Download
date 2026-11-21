@@ -1,8 +1,8 @@
-"""Full per-video metadata; playlist owner is never used as the track artist."""
+"""YouTube and bilibili via yt-dlp. Full per-video metadata; playlist owner is never the track artist."""
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 import re
 import threading
 import shutil
@@ -38,6 +38,11 @@ NUMBERING = ('auto', 'source', 'oldest_first', 'newest_first')
 
 
 def channel_tab(url):
+    if is_bilibili(url):
+        # space.bilibili.com/<uid>[/upload]/video lists uploads newest first.
+        p = urlparse(url)
+        return 'videos' if (p.hostname or '').startswith('space.') and re.fullmatch(
+            r'/\d+(?:/upload)?(?:/video)?/?', p.path) else ''
     parts = urlparse(url).path.rstrip('/').split('/')
     return parts[-1] if len(parts) > 2 and parts[-1] in CHANNEL_TABS else ''
 
@@ -75,11 +80,43 @@ def renumber(result, numbering, tab):
             for i, entry in enumerate(result)]
 
 
+YOUTUBE_HOSTS = ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be')
+BILIBILI_SHORT_HOSTS = ('b23.tv', 'bili2233.cn')
+BILIBILI_VIDEO = re.compile(r'/(?:s/)?video/((?:BV|bv)[0-9A-Za-z]{10}|(?:av|AV)\d+)')
+
+
+def is_bilibili(url):
+    host = (urlparse(url.strip()).hostname or '').lower()
+    return (host == 'bilibili.com' or host.endswith('.bilibili.com') or
+            host in BILIBILI_SHORT_HOSTS or host.endswith(tuple('.' + h for h in BILIBILI_SHORT_HOSTS)))
+
+
+def normalize_bilibili(url, mode='auto'):
+    """Drop share/tracking parameters; keep only the part number (?p=) of multi-part videos.
+
+    auto: a link with ?p= is that one part, without it a multi-part video becomes a list.
+    single: one part (part 1 when none given). playlist: every part of the video."""
+    p = urlparse(url.strip())
+    if (p.hostname or '').lower().endswith(BILIBILI_SHORT_HOSTS):
+        return url.strip()  # resolved by YouTubeService.entries (needs a network redirect)
+    video = BILIBILI_VIDEO.search(p.path)
+    if not video:
+        if mode == 'single' and '/audio/au' not in p.path:
+            raise ValueError('單曲模式請貼入 bilibili 影片（BV／av）或音樂（au）網址')
+        return url.strip()
+    part = (parse_qs(p.query).get('p') or [''])[0]
+    clean = 'https://www.bilibili.com/video/' + video.group(1)
+    if part.isdigit() and int(part) > 0 and mode != 'playlist':
+        clean += '?' + urlencode({'p': part})
+    return clean
+
+
 def normalize_url(url, mode='auto'):
     p = urlparse(url.strip())
-    if p.scheme not in ('http', 'https') or (p.hostname or '').lower() not in (
-        'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be'):
-        raise ValueError('請輸入有效的 YouTube 網址')
+    if p.scheme in ('http', 'https') and is_bilibili(url):
+        return normalize_bilibili(url, mode)
+    if p.scheme not in ('http', 'https') or (p.hostname or '').lower() not in YOUTUBE_HOSTS:
+        raise ValueError('請輸入有效的 YouTube 或 bilibili 網址')
     q = parse_qs(p.query)
     if mode == 'playlist' and not q.get('list') and not p.path.rstrip('/').endswith('/releases'):
         raise ValueError('此網址沒有播放清單 list 參數')
@@ -113,6 +150,8 @@ def metadata(info, index=1, album='', auto_clean_titles=True):
     original_artist = info.get('channel') or info.get('uploader') or ''
     artist = clean_artist(original_artist)
     raw_title = info.get('track') or info.get('title') or ''
+    if auto_clean_titles and not info.get('track'):
+        raw_title = bilibili_part_title(info, raw_title)
     title = clean_title(raw_title, artist) if auto_clean_titles and not info.get('track') else raw_title
     warnings = []
     if not date:
@@ -125,6 +164,27 @@ def metadata(info, index=1, album='', auto_clean_titles=True):
                  original_albumartist=original_artist, source_date=date,
                  albumartist=artist, album=info.get('album') or album,
                  tracknumber=str(index), date=date, warning='；'.join(warnings))
+
+
+def bilibili_part_title(info, title):
+    """yt-dlp names multi-part videos '<video title> p03 <part name>'; a song needs the part name."""
+    if 'bilibili' not in str(info.get('extractor_key') or info.get('webpage_url') or '').lower():
+        return title
+    match = re.fullmatch(r'.+ p\d{2,} (.+)', title or '')
+    return match.group(1).strip() if match and match.group(1).strip() else title
+
+
+def friendly_error(exc, url=''):
+    """Explain bilibili's common refusals instead of showing a raw yt-dlp trace."""
+    text = str(exc)
+    if not is_bilibili(url):
+        return exc
+    if '412' in text or 'rate limit' in text.lower():
+        return ValueError('bilibili 暫時拒絕請求（412／頻率限制），請稍候再重試；'
+                          '或在「下載設定」指定已登入的 cookies.txt')
+    if 'login' in text.lower() or '-403' in text or '大会员' in text or '大會員' in text:
+        return ValueError('此 bilibili 內容需要登入或大會員，請在「下載設定」指定 cookies.txt')
+    return exc
 
 
 class YouTubeService:
@@ -174,6 +234,8 @@ class YouTubeService:
         url = normalize_url(url, mode)
         check_cancel(self.cancel)
         releases = urlparse(url).path.endswith('/releases')
+        if (urlparse(url).hostname or '').lower().endswith(BILIBILI_SHORT_HOSTS):
+            url = normalize_url(self.expand_short_url(url), mode)
         cached = self._cached('lists', url)
         if cached and releases and not any(
                 isinstance(e, dict) and 'thumbnails' in e for e in cached['data'].get('entries') or []):
@@ -184,8 +246,12 @@ class YouTubeService:
             self.progress(f'讀取掃描快取：{cached["scanned_at"]}；如需新歌曲，請勾選重新掃描')
         else:
             # True leaves nested release playlists unopened.
-            with yt_dlp.YoutubeDL(self.options(extract_flat=True, noplaylist=mode == 'single', ignoreerrors=True)) as ydl:
-                info = ydl.extract_info(url, download=False)
+            try:
+                with yt_dlp.YoutubeDL(self.options(extract_flat=True, noplaylist=mode == 'single',
+                                                   ignoreerrors=not is_bilibili(url))) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as exc:
+                raise friendly_error(exc, url) from exc
             if not info:
                 raise ValueError('無法取得影片或清單資訊')
             if 'entries' in info:
@@ -227,6 +293,18 @@ class YouTubeService:
         result = renumber(result, numbering if numbering in NUMBERING else 'auto', tab)
         self.progress(f'清單解析完成：保留 {len(result)} 項，略過 {skipped} 個多首專輯')
         return result
+
+    def expand_short_url(self, url):
+        """b23.tv share links only redirect; follow once to the real bilibili page."""
+        check_cancel(self.cancel)
+        try:
+            with yt_dlp.YoutubeDL(self.options()) as ydl, ydl.urlopen(url) as response:
+                target = response.url
+        except Exception as exc:
+            raise ValueError(f'無法展開 bilibili 短網址：{exc}') from exc
+        if not is_bilibili(target) or (urlparse(target).hostname or '').endswith(BILIBILI_SHORT_HOSTS):
+            raise ValueError('短網址沒有指向 bilibili 頁面')
+        return target
 
     def resolve_single_release(self, url, count=None):
         check_cancel(self.cancel)
@@ -299,7 +377,10 @@ class YouTubeService:
             self.progress('使用已儲存的影片日期與資訊')
             return metadata(cached['data'], index, album)
         with yt_dlp.YoutubeDL(self.options()) as ydl:
-            info = ydl.extract_info(url, download=False)
+            try:
+                info = ydl.extract_info(url, download=False)
+            except Exception as exc:
+                raise friendly_error(exc, url) from exc
         if not info or 'entries' in info:
             raise ValueError('影片資訊為空或仍為清單')
         self._save_video(url, info)
@@ -310,7 +391,7 @@ class YouTubeService:
         if metadata(info).source_date:
             self._save_scan('videos', url, {k: info.get(k) for k in (
                 'title', 'track', 'channel', 'uploader', 'album', 'upload_date',
-                'timestamp', 'webpage_url', 'original_url')})
+                'timestamp', 'webpage_url', 'original_url', 'extractor_key')})
 
     def check_date(self, track):
         self.resolve_track(track)
@@ -346,7 +427,10 @@ class YouTubeService:
                     self.progress(f'{track.title or track.url}：下載 {data.get("downloaded_bytes", 0)/total:.0%}')
         with yt_dlp.YoutubeDL(self.options(format='bestaudio/best', outtmpl=str(folder/'source.%(ext)s'),
                                          progress_hooks=[hook])) as ydl:
-            info = ydl.extract_info(track.url, download=True)
+            try:
+                info = ydl.extract_info(track.url, download=True)
+            except Exception as exc:
+                raise friendly_error(exc, track.url) from exc
             check_cancel(self.cancel)
             if not info or 'entries' in info:
                 raise ValueError('下載未返回單首音訊')

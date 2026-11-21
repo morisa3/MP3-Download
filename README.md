@@ -1,4 +1,4 @@
-# EZ Audio Studio v1.9.0
+# EZ Audio Studio v1.10.0
 
 整合 YouTube 單曲／播放清單下載、標籤編輯、封面裁切及內嵌、響度掃描與音訊輸出。沿用 **Python 3.12 + Flet 0.21.2**。
 
@@ -7,6 +7,26 @@
 將 ZIP 解壓到可寫入的資料夾，雙擊 `start.vbs`（不開 cmd 視窗）或 `start.bat`。第一次尚未建立 Python 環境時，`start.vbs` 會自動改開 `start.bat` 顯示安裝進度；之後就不再出現 cmd 視窗，錯誤訊息改以對話框顯示，詳細輸出寫入 `%LOCALAPPDATA%\EZAudioStudio\console.log`。第一次會建立 `%LOCALAPPDATA%\EZAudioStudio\venv-py312`，只在缺套件或 Flet 版本不符時安裝依賴；安裝成功後同一次操作直接開啟程式。之後更新程式並解壓到另一個資料夾，也共用這份 Python 環境，不必重新執行完整環境檢查。若需要詳細檢查，才手動執行 `check_environment.py`。
 
 需安裝 Python 3.12 與 Python Launcher（`py`）。YouTube 網站可能需要 JavaScript runtime；若下載失敗且尚未安裝，可執行 `install_runtime.bat` 安裝 Deno。本包不包含 FFmpeg，請自行放入 `EZAudioStudio\ffmpeg\bin\ffmpeg.exe`。請勿直接在 ZIP 壓縮檔中執行。
+
+## v1.10.0 bilibili 支援
+
+網址欄可直接貼 bilibili 網址，流程（日期篩選、封面裁切、響度、輸出）與 YouTube 相同。
+
+| 網址 | 自動模式的處理 |
+| --- | --- |
+| `bilibili.com/video/BV…` 單P | 單曲 |
+| `bilibili.com/video/BV…` 多P（未帶 `?p=`） | 每個分P一首；標題取分P名稱，專輯名稱為影片標題 |
+| `bilibili.com/video/BV…?p=3` | 只取第 3P；「整份清單」模式則取全部分P |
+| `b23.tv/…` 分享短網址 | 先展開成實際網址再處理 |
+| `bilibili.com/audio/au…`（音樂區） | 單曲 |
+| `space.bilibili.com/<UID>/video` | UP 主全部投稿，比照 YouTube `/videos` 依發布時間編號（最舊為 1） |
+| 合集、系列、收藏夾 | 照清單原順序 |
+
+- 分享網址中的追蹤參數（`spm_id_from`、`vd_source` 等）會自動移除，同一支影片不會因參數不同被重複下載。
+- 歌手欄使用 UP 主名稱，日期為投稿日期。
+- **音質與登入**：未登入時 bilibili 通常只給較低音質的音訊。要較高音質，請用瀏覽器擴充功能（如 Get cookies.txt LOCALLY）匯出**已登入**的 cookies.txt，在「下載設定」指定；Hi-Res 需大會員。程式只記住檔案位置（`%LOCALAPPDATA%\EZAudioStudio\cookies_path.txt`），不把內容寫入專案。cookies.txt 等同登入憑證，請勿分享。
+- 出現 412 代表 bilibili 暫時限制請求頻率，稍候按「重試失敗項目」；UP 主空間頁特別容易遇到，指定 cookies 通常可改善。
+- 番劇、課程等付費內容不在支援範圍。
 
 ## v1.9.0 修正與改進
 

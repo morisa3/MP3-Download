@@ -53,7 +53,7 @@ def action_button(text, icon, handler, color=COLOR_PRIMARY):
 
 
 OUTPUT_DIRECTORY = r'E:\download'
-APP_VERSION = '1.9.0'
+APP_VERSION = '1.10.0'
 
 
 class Studio(BatchActions):
@@ -81,7 +81,7 @@ class Studio(BatchActions):
         self.numbering = 'auto'
         self.download_options_btn = ft.OutlinedButton('下載設定', height=40,
             icon=ft.icons.DATE_RANGE, on_click=self.download_options_clicked)
-        self.url = ft.TextField(label='YouTube 單曲／播放清單網址', expand=True)
+        self.url = ft.TextField(label='YouTube／bilibili 單曲或清單網址', expand=True)
         self.mode = ft.Dropdown(label='網址模式', value='auto', width=140,
             options=[ft.dropdown.Option('auto', '自動／含清單'), ft.dropdown.Option('single', '只取單曲'), ft.dropdown.Option('playlist', '整份清單')])
         self.folder = ft.TextField(label='輸出位置（預設 E:\\download，可自行修改）', value=OUTPUT_DIRECTORY, expand=True)
@@ -124,7 +124,8 @@ class Studio(BatchActions):
         self.project_picker = ft.FilePicker(on_result=self.project_picked)
         self.folder_picker = ft.FilePicker(on_result=self.folder_picked)
         self.cookies_picker = ft.FilePicker(on_result=self.cookies_picked)
-        self.cookiefile = ''
+        self.cookiefile = self.load_cookie_path()
+        self.cookie_field = None
         self.cover_target = None
         page.overlay.extend([self.audio_picker, self.image_picker, self.cover_picker, self.project_picker, self.cookies_picker, self.folder_picker])
         for control in (self.url, self.mode, self.folder, self.format, self.bitrate,
@@ -271,6 +272,14 @@ class Studio(BatchActions):
             ft.dropdown.Option('oldest_first', '依發行時間：最舊為 1（新歌接在最後）'),
             ft.dropdown.Option('newest_first', '依發行時間：最新為 1'),
             ft.dropdown.Option('source', '照來源清單順序')])
+        self.cookie_field = ft.TextField(label='登入 cookies.txt（選用）', value=self.cookiefile,
+            read_only=True, expand=True, dense=True,
+            hint_text='bilibili 高音質／需登入內容才需要')
+        cookie_row = ft.Row([self.cookie_field,
+            ft.IconButton(ft.icons.FOLDER_OPEN, tooltip='指定 cookies.txt',
+                on_click=lambda e: self.cookies_picker.pick_files(allowed_extensions=['txt'])),
+            ft.IconButton(ft.icons.CLEAR, tooltip='不使用 cookies',
+                on_click=lambda e: self.set_cookiefile(''))])
         error = ft.Text(color='red')
         def clear(e):
             start.value, end.value = '', ''
@@ -301,7 +310,10 @@ class Studio(BatchActions):
                 ft.Text("releases 頁面只讀單曲；多首專輯略過。首數未知時最多讀前兩個項目。"),
                 ft.Text('頻道 releases／videos 頁由新到舊排列；依發行時間編號時以頁面順序推算，'
                         '重新掃描後已在清單的歌曲也會更新曲號（手動改過曲號者保留）。'),
-                numbering, cleanup, refresh, error,
+                numbering, cleanup, refresh,
+                ft.Text('bilibili：未登入通常只能取得較低音質的音訊；要較高音質，請用瀏覽器擴充功能匯出已登入的 '
+                        'cookies.txt 後在此指定。Hi-Res 需大會員。cookies.txt 等同登入憑證，請勿分享。'),
+                cookie_row, error,
             ], tight=True, scroll=ft.ScrollMode.AUTO)),
             actions=[ft.TextButton('取消', on_click=lambda e: close_dialog(self.page, dialog)),
                      ft.FilledButton('套用設定', on_click=save)])
@@ -484,10 +496,32 @@ class Studio(BatchActions):
         except Exception as exc:
             self.message(exc)
 
+    COOKIE_SETTING = 'cookies_path.txt'
+
+    @staticmethod
+    def load_cookie_path():
+        # Only the file location is remembered; cookie contents never enter session.json.
+        try:
+            path = (DATA / Studio.COOKIE_SETTING).read_text(encoding='utf-8').strip()
+            return path if path and Path(path).is_file() else ''
+        except OSError:
+            return ''
+
+    def set_cookiefile(self, path):
+        self.cookiefile = path or ''
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            (DATA / self.COOKIE_SETTING).write_text(self.cookiefile, encoding='utf-8')
+        except OSError as exc:
+            self.message(f'cookies 路徑無法記住（本次仍可用）：{exc}')
+        if self.cookie_field is not None:
+            self.cookie_field.value = self.cookiefile
+        self.page.update()
+
     def cookies_picked(self, e):
         if e.files and not self.busy:
-            self.cookiefile = e.files[0].path
-            self.message('已指定 cookies.txt；內容不會存入專案。')
+            self.set_cookiefile(e.files[0].path)
+            self.message('已指定 cookies.txt；只記住檔案位置，內容不會存入專案。')
 
     def project_picked(self, e):
         if e.files and not self.busy:
